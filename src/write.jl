@@ -164,6 +164,7 @@ function write(file, itr;
     compress::Bool=false,
     writeheader=nothing,
     partition::Bool=false,
+    fixedwidth::Bool=false,
     kw...)
     if writeheader !== nothing
         Base.depwarn("`writeheader=$writeheader` is deprecated in favor of `header=$writeheader`", :write)
@@ -183,20 +184,20 @@ function write(file, itr;
                     if file isa String
                         push!(outfiles, string(file, "_$i"))
                     end
-                    write(outfiles[i], part; append=append, compress=compress, writeheader=writeheader, partition=false, kw...)
+                    write(outfiles[i], part; append=append, compress=compress, writeheader=writeheader, partition=false, fixedwidth, kw...)
                 end
             else
                 if file isa String
                     push!(outfiles, string(file, "_$i"))
                 end
-                write(outfiles[i], part; append=append, compress=compress, writeheader=writeheader, partition=false, kw...)
+                write(outfiles[i], part; append=append, compress=compress, writeheader=writeheader, partition=false, fixedwidth, kw...)
             end
         end
         return outfiles
     else
         rows = Tables.rows(itr)
         sch = Tables.schema(rows)
-        return write(sch, rows, file, opts; append=append, compress=compress, header=header, kw...)
+        return write(sch, rows, file, opts; append=append, compress=compress, header=header, fixedwidth, kw...)
     end
 end
 
@@ -205,6 +206,7 @@ function write(sch::Tables.Schema, rows, file, opts;
         compress::Bool=false,
         header::Union{Bool, Vector}=String[],
         bufsize::Int=2^22,
+        fixedwidth::Bool=false,
         kw...
     )
     colnames = !(header isa Vector) || isempty(header) ? sch.names : header
@@ -222,7 +224,11 @@ function write(sch::Tables.Schema, rows, file, opts;
         end
         ref = Ref{Int}(pos)
         for row in rows
-            writerow(buf, ref, len, io, sch, row, cols, opts)
+            if fixedwidth
+                writefixedwidthrow(buf, ref, len, io, sch, row, cols, opts)
+            else
+                writerow(buf, ref, len, io, sch, row, cols, opts)
+            end
         end
         Base.write(io, resize!(buf, ref[] - 1))
     end
@@ -235,6 +241,7 @@ function write(::Nothing, rows, file, opts;
         compress::Bool=false,
         header::Union{Bool, Vector}=String[],
         bufsize::Int=2^22,
+        fixedwidth::Bool=false,
         kw...
     )
     len = bufsize
@@ -264,7 +271,11 @@ function write(::Nothing, rows, file, opts;
         end
         ref = Ref{Int}(pos)
         while true
-            writerow(buf, ref, len, io, sch, row, cols, opts)
+            if fixedwidth
+                writefixedwidthrow(buf, ref, len, io, sch, row, cols, opts)
+            else
+                writerow(buf, ref, len, io, sch, row, cols, opts)
+            end
             state = iterate(rows, st)
             state === nothing && break
             row, st = state
@@ -394,6 +405,27 @@ function writerow(row; opts::Union{Options, Nothing}=nothing, bufsize::Int=2^22,
         pos = writedelimnewline(buf, pos, len, io, ifelse(i == length(nms), opts.newline, opts.delim))
     end
     return unsafe_string(pointer(buf), pos - 1)
+end
+
+writefixedwidthrow(buf, pos, len, io, ::Nothing, row, cols, opts, collengths=repeat([15], cols)) =
+    writefixedwidthrow(buf, pos, len, io, Tables.Schema(Tables.columnnames(row), nothing), row, cols, opts, collengths)
+
+function writefixedwidthrow(
+        buf, pos, len, io, sch, row, cols, opts, 
+        collengths=repeat([10], cols),
+        alignright=true,
+    )
+    n, d = opts.newline, opts.delim
+    Tables.eachcolumn(sch, row) do val, col, nm
+        Base.@_inline_meta
+        val = opts.transform(col, val)
+        val === nothing && nothingerror(col)
+        pos[] = writefixedwithcell(
+            buf, pos[], len, io, val, opts, n, d,
+            collengths[col], alignright, col == cols
+        )
+    end
+    return
 end
 
 function writecell(buf, pos, len, io, ::Missing, opts)
@@ -527,6 +559,33 @@ function writecell(buf, pos, len, io, x::AbstractString, opts)
         pos += 1
     end
     return pos
+end
+
+function writefixedwithcell(
+        buf, posx, len, io, val, opts, n, d,
+        collen, alignright, islastcol
+    )
+    ipos = posx
+    fpos = collen + ipos
+
+    # Write cell value
+    posx = writecell(buf, ipos, len, io, val, opts)
+    cellfpos = posx
+    # Insert delimiter till the column width
+    while posx < fpos
+        posx = writedelimnewline(buf, posx, len, io, d)
+    end
+    # Move the value to the end for right alignment
+    if alignright
+        cellval = splice!(buf, ipos:(cellfpos-1))
+        insert!.(Ref(buf), (ipos+(fpos-cellfpos)):(fpos-1), cellval)
+    end
+    # Write newline after last column
+    if islastcol
+        posx = writedelimnewline(buf, posx, len, io, n)
+    end
+
+    return posx
 end
 
 function check(bytes, sz, delim::UInt8, oq, cq, newline::UInt8)
