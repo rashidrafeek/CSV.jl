@@ -158,6 +158,18 @@ function Base.iterate(r::RowWriter, (state, cols))
     return unsafe_string(pointer(r.buf), ref[] - 1), (iterate(r.source, st), cols)
 end
 
+function write_fwf(file, itr;
+    append::Bool=false,
+    compress::Bool=false,
+    writeheader=nothing,
+    partition::Bool=false,
+    collengths::Union{Vector{Int}, Vector{<:AbstractRange}}=Int[],
+    alignright::Bool=true,
+    kw...)
+    fixedwidth = true
+    write(file, itr; append, compress, writeheader, partition, fixedwidth, collengths, alignright, kw...)
+end
+
 write(file; kwargs...) = x->write(file, x; kwargs...)
 function write(file, itr;
     append::Bool=false,
@@ -225,7 +237,10 @@ function write(sch::Tables.Schema, rows, file, opts;
         ref = Ref{Int}(pos)
         for row in rows
             if fixedwidth
-                writefixedwidthrow(buf, ref, len, io, sch, row, cols, opts)
+                collengths = kw[:collengths]
+                alignright = kw[:alignright]
+                isempty(collengths) && append!(collengths, repeat([10], cols))
+                writefixedwidthrow(buf, ref, len, io, sch, row, cols, opts, collengths, alignright)
             else
                 writerow(buf, ref, len, io, sch, row, cols, opts)
             end
@@ -272,7 +287,9 @@ function write(::Nothing, rows, file, opts;
         ref = Ref{Int}(pos)
         while true
             if fixedwidth
-                writefixedwidthrow(buf, ref, len, io, sch, row, cols, opts)
+                collengths = kw[:collengths]
+                alignright = kw[:alignright]
+                writefixedwidthrow(buf, ref, len, io, sch, row, cols, opts, collengths, alignright)
             else
                 writerow(buf, ref, len, io, sch, row, cols, opts)
             end
@@ -407,8 +424,8 @@ function writerow(row; opts::Union{Options, Nothing}=nothing, bufsize::Int=2^22,
     return unsafe_string(pointer(buf), pos - 1)
 end
 
-writefixedwidthrow(buf, pos, len, io, ::Nothing, row, cols, opts, collengths=repeat([15], cols)) =
-    writefixedwidthrow(buf, pos, len, io, Tables.Schema(Tables.columnnames(row), nothing), row, cols, opts, collengths)
+writefixedwidthrow(buf, pos, len, io, ::Nothing, row, cols, opts, collengths, alignright) =
+    writefixedwidthrow(buf, pos, len, io, Tables.Schema(Tables.columnnames(row), nothing), row, cols, opts, collengths, alignright)
 
 function writefixedwidthrow(
         buf, pos, len, io, sch, row, cols, opts, 
